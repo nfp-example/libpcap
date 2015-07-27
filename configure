@@ -738,6 +738,9 @@ enable_yydebug
 with_dag
 with_dag_includes
 with_dag_libraries
+with_nfpshm
+with_nfpshm_includes
+with_nfpshm_libraries
 with_septel
 with_snf
 with_snf_includes
@@ -1408,6 +1411,12 @@ Optional Packages:
   --with-dag-includes=DIR Endace DAG include directory
   --with-dag-libraries=DIR
                           Endace DAG library directory
+  --with-nfpshm[=DIR]     include NFP SHM support ["yes", "no" or DIR;
+                          default="yes" on BSD and Linux if present]
+  --with-nfpshm-includes=DIR
+                          NFP SHM include directory
+  --with-nfpshm-libraries=DIR
+                          NFP SHM library directory
   --with-septel[=DIR]     include Septel support (located in directory DIR, if
                           supplied). [default=yes, on Linux, if present]
   --with-snf[=DIR]        include Myricom SNF support ["yes", "no" or DIR;
@@ -4334,7 +4343,7 @@ else
     We can't simply define LARGE_OFF_T to be 9223372036854775807,
     since some C++ compilers masquerading as C compilers
     incorrectly reject 9223372036854775807.  */
-#define LARGE_OFF_T (((off_t) 1 << 62) - 1 + ((off_t) 1 << 62))
+#define LARGE_OFF_T ((((off_t) 1 << 31) << 31) - 1 + (((off_t) 1 << 31) << 31))
   int off_t_is_large[(LARGE_OFF_T % 2147483629 == 721
 		       && LARGE_OFF_T % 2147483647 == 1)
 		      ? 1 : -1];
@@ -4380,7 +4389,7 @@ else
     We can't simply define LARGE_OFF_T to be 9223372036854775807,
     since some C++ compilers masquerading as C compilers
     incorrectly reject 9223372036854775807.  */
-#define LARGE_OFF_T (((off_t) 1 << 62) - 1 + ((off_t) 1 << 62))
+#define LARGE_OFF_T ((((off_t) 1 << 31) << 31) - 1 + (((off_t) 1 << 31) << 31))
   int off_t_is_large[(LARGE_OFF_T % 2147483629 == 721
 		       && LARGE_OFF_T % 2147483647 == 1)
 		      ? 1 : -1];
@@ -4404,7 +4413,7 @@ rm -f core conftest.err conftest.$ac_objext conftest.$ac_ext
     We can't simply define LARGE_OFF_T to be 9223372036854775807,
     since some C++ compilers masquerading as C compilers
     incorrectly reject 9223372036854775807.  */
-#define LARGE_OFF_T (((off_t) 1 << 62) - 1 + ((off_t) 1 << 62))
+#define LARGE_OFF_T ((((off_t) 1 << 31) << 31) - 1 + (((off_t) 1 << 31) << 31))
   int off_t_is_large[(LARGE_OFF_T % 2147483629 == 721
 		       && LARGE_OFF_T % 2147483647 == 1)
 		      ? 1 : -1];
@@ -4449,7 +4458,7 @@ else
     We can't simply define LARGE_OFF_T to be 9223372036854775807,
     since some C++ compilers masquerading as C compilers
     incorrectly reject 9223372036854775807.  */
-#define LARGE_OFF_T (((off_t) 1 << 62) - 1 + ((off_t) 1 << 62))
+#define LARGE_OFF_T ((((off_t) 1 << 31) << 31) - 1 + (((off_t) 1 << 31) << 31))
   int off_t_is_large[(LARGE_OFF_T % 2147483629 == 721
 		       && LARGE_OFF_T % 2147483647 == 1)
 		      ? 1 : -1];
@@ -4473,7 +4482,7 @@ rm -f core conftest.err conftest.$ac_objext conftest.$ac_ext
     We can't simply define LARGE_OFF_T to be 9223372036854775807,
     since some C++ compilers masquerading as C compilers
     incorrectly reject 9223372036854775807.  */
-#define LARGE_OFF_T (((off_t) 1 << 62) - 1 + ((off_t) 1 << 62))
+#define LARGE_OFF_T ((((off_t) 1 << 31) << 31) - 1 + (((off_t) 1 << 31) << 31))
   int off_t_is_large[(LARGE_OFF_T % 2147483629 == 721
 		       && LARGE_OFF_T % 2147483647 == 1)
 		      ? 1 : -1];
@@ -5898,6 +5907,10 @@ dag)
 	V_DEFS="$V_DEFS -DDAG_ONLY"
 	;;
 
+nfpshm)
+	V_DEFS="$V_DEFS -DNFPSHM_ONLY"
+	;;
+
 septel)
 	V_DEFS="$V_DEFS -DSEPTEL_ONLY"
 	;;
@@ -6438,6 +6451,163 @@ $as_echo "no" >&6; }
 		# User requested "dag" capture type but the DAG API wasn't
 		# found.
 		as_fn_error $? "Specifying the capture type as \"dag\" requires the DAG API to be present; use the --with-dag options to specify the location. (Try \"./configure --help\" for more information.)" "$LINENO" 5
+	fi
+else
+	{ $as_echo "$as_me:${as_lineno-$LINENO}: result: yes" >&5
+$as_echo "yes" >&6; }
+fi
+
+# Check for NFP SHM support (nfp-example pcap shared memory firmware + libraries)
+
+# Check whether --with-nfpshm was given.
+if test "${with_nfpshm+set}" = set; then :
+  withval=$with_nfpshm;
+	if test "$withval" = no
+	then
+		# User doesn't want NFPSHM support.
+		want_nfpshm=no
+	elif test "$withval" = yes
+	then
+		# User wants NFPSHM support but hasn't specified a directory.
+		want_nfpshm=yes
+	else
+		# User wants NFPSHM support and has specified a directory, so use the provided value.
+		want_nfpshm=yes
+		nfpshm_root=$withval
+	fi
+
+else
+
+	#
+	# Use NFPSHM API if present, otherwise don't
+	#
+	want_nfpshm=ifpresent
+
+fi
+
+
+
+# Check whether --with-nfpshm-includes was given.
+if test "${with_nfpshm_includes+set}" = set; then :
+  withval=$with_nfpshm_includes;
+	# User wants NFPSHM support and has specified a header directory, so use the provided value.
+	want_nfpshm=yes
+	nfpshm_include_dir=$withval
+
+fi
+
+
+
+# Check whether --with-nfpshm-libraries was given.
+if test "${with_nfpshm_libraries+set}" = set; then :
+  withval=$with_nfpshm_libraries;
+	# User wants NFPSHM support and has specified a library directory, so use the provided value.
+	want_nfpshm=yes
+	nfpshm_lib_dir=$withval
+
+fi
+
+
+case "$V_PCAP" in
+linux|bpf|nfpshm)
+	#
+	# We support the NFP SHM API if we're on Linux or BSD, or if we're
+	# building a NFP SHM-only libpcap.
+	#
+	;;
+*)
+	#
+	# If the user explicitly requested NFPSHM, tell them it's not
+	# supported.
+	#
+	# If they expressed no preference, don't include it.
+	#
+	if test $want_nfpshm = yes; then
+		as_fn_error $? "NFP SHM support is only available with 'linux' 'bpf' and 'nfpshm' packet capture types" "$LINENO" 5
+	elif test $want_nfpshm = yes; then
+		want_nfpshm=no
+	fi
+	;;
+esac
+
+ac_cv_lbl_nfpshm_api=no
+if test "$want_nfpshm" != no; then
+
+	{ $as_echo "$as_me:${as_lineno-$LINENO}: checking whether we have NFP SHM API headers" >&5
+$as_echo_n "checking whether we have NFP SHM API headers... " >&6; }
+
+	# If necessary, set default paths for NFPSHM API headers and libraries.
+	if test -z "$nfpshm_root"; then
+	    nfpshm_root=/usr/local
+	fi
+
+	if test -z "$nfpshm_include_dir"; then
+		nfpshm_include_dir="$nfpshm_root/include"
+	fi
+
+	if test -z "$nfpshm_lib_dir"; then
+	    nfpshm_lib_dir="$nfpshm_root/host/lib"
+	fi
+
+	if test -r $nfpshm_include_dir/nfpshm.h; then
+		ac_cv_lbl_nfpshm_api=yes
+	fi
+	{ $as_echo "$as_me:${as_lineno-$LINENO}: result: $ac_cv_lbl_nfpshm_api ($nfpshm_include_dir)" >&5
+$as_echo "$ac_cv_lbl_nfpshm_api ($nfpshm_include_dir)" >&6; }
+fi
+
+if test $ac_cv_lbl_nfpshm_api = yes; then
+	V_INCLS="$V_INCLS -I$nfpshm_include_dir"
+
+	if test $V_PCAP != nfpshm ; then
+		 SSRC="pcap-nfpshm.c"
+	fi
+
+	# See if we can find a general version string.
+	# Don't need to save and restore LIBS to prevent -ldag being
+	# included if there's a found-action (arg 3).
+	saved_ldflags=$LDFLAGS
+	LDFLAGS="-L$dag_lib_dir"
+	#AC_CHECK_LIB([dag], [dag_attach_stream], [dag_streams="1"], [dag_streams="0"])
+	#AC_CHECK_LIB([dag],[dag_get_erf_types], [
+	#	AC_DEFINE(HAVE_DAG_GET_ERF_TYPES, 1, [define if you have dag_get_erf_types()])])
+	#AC_CHECK_LIB([dag],[dag_get_stream_erf_types], [
+	#	AC_DEFINE(HAVE_DAG_GET_STREAM_ERF_TYPES, 1, [define if you have dag_get_stream_erf_types()])])
+
+	LDFLAGS=$saved_ldflags
+
+	#if test "$dag_streams" = 1; then
+	#	AC_DEFINE(HAVE_DAG_STREAMS_API, 1, [define if you have streams capable DAG API])
+	#	LIBS="$LIBS -ldag"
+	#	LDFLAGS="$LDFLAGS -L$dag_lib_dir"
+
+	#	AC_CHECK_LIB([vdag],[vdag_set_device_info], [ac_dag_have_vdag="1"], [ac_dag_have_vdag="0"])
+	#	if test "$ac_dag_have_vdag" = 1; then
+	#		AC_DEFINE(HAVE_DAG_VDAG, 1, [define if you have vdag_set_device_info()])
+	#		LIBS="$LIBS -lpthread"
+	#	fi
+	#fi
+
+
+$as_echo "#define HAVE_NFPSHM_API 1" >>confdefs.h
+
+fi
+
+{ $as_echo "$as_me:${as_lineno-$LINENO}: checking whether we have the NFPSHM API" >&5
+$as_echo_n "checking whether we have the NFPSHM API... " >&6; }
+
+if test $ac_cv_lbl_nfpshm_api = no; then
+	{ $as_echo "$as_me:${as_lineno-$LINENO}: result: no" >&5
+$as_echo "no" >&6; }
+	if test "$want_nfpshm" = yes; then
+        	# User wanted NFP SHM support but we couldn't find it.
+		as_fn_error $? "NFP SHM API requested, but not found at $nfpshm_root: use --without-nfpshm" "$LINENO" 5
+	fi
+
+	if test "$V_PCAP" = nfpshm; then
+		# User requested "nfpshm" capture type but the NFP SHM API wasn't
+		# found.
+		as_fn_error $? "Specifying the capture type as \"nfpshm\" requires the NFP SHM API to be present; use the --with-nfpshm options to specify the location. (Try \"./configure --help\" for more information.)" "$LINENO" 5
 	fi
 else
 	{ $as_echo "$as_me:${as_lineno-$LINENO}: result: yes" >&5

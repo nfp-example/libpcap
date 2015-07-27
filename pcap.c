@@ -72,6 +72,10 @@
 #include "pcap-dag.h"
 #endif /* HAVE_DAG_API */
 
+#ifdef HAVE_NFPSHM_API
+#include "pcap-nfpshm.h"
+#endif /* HAVE_NFPSHM_API */
+
 #ifdef HAVE_SEPTEL_API
 #include "pcap-septel.h"
 #endif /* HAVE_SEPTEL_API */
@@ -283,6 +287,19 @@ pcap_create(const char *source, char *errbuf)
 	int is_ours;
 	return (dag_create(source, errbuf, &is_ours));
 }
+#elif defined(NFPSHM_ONLY)
+int
+pcap_findalldevs(pcap_if_t **alldevsp, char *errbuf)
+{
+	return (nfpshm_findalldevs(alldevsp, errbuf));
+}
+
+pcap_t *
+pcap_create(const char *source, char *errbuf)
+{
+	int is_ours;
+	return (nfpshm_create(source, errbuf, &is_ours));
+}
 #elif defined(SEPTEL_ONLY)
 int
 pcap_findalldevs(pcap_if_t **alldevsp, char *errbuf)
@@ -316,6 +333,9 @@ struct capture_source_type {
 } capture_source_types[] = {
 #ifdef HAVE_DAG_API
 	{ dag_findalldevs, dag_create },
+#endif
+#ifdef HAVE_NFPSHM_API
+	{ nfpshm_findalldevs, nfpshm_create },
 #endif
 #ifdef HAVE_SEPTEL_API
 	{ septel_findalldevs, septel_create },

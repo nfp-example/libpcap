@@ -241,6 +241,7 @@ EXTRA_DIST = \
 	README \
 	README.aix \
 	README.dag \
+	README.nfpshm \
 	README.hpux \
 	README.linux \
 	README.macosx \
@@ -306,6 +307,8 @@ EXTRA_DIST = \
 	pcap-config.in \
 	pcap-dag.c \
 	pcap-dag.h \
+	pcap-nfpshm.c \
+	pcap-nfpshm.h \
 	pcap-dbus.c \
 	pcap-dbus.h \
 	pcap-dlpi.c \

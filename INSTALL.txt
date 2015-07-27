@@ -299,6 +299,7 @@ README.dag	- notes on using libpcap to capture on Endace DAG devices
 README.hpux	- notes on using libpcap on HP-UX
 README.linux	- notes on using libpcap on Linux
 README.macosx	- notes on using libpcap on Mac OS X
+README.nfpshm  - notes on using libpcap to capture with NFP pcap firmware
 README.septel   - notes on using libpcap to capture on Intel/Septel devices
 README.sita	- notes on using libpcap to capture on SITA devices
 README.tru64	- notes on using libpcap on Digital/Tru64 UNIX
@@ -357,6 +358,8 @@ pcap-bt-linux.c	- Bluetooth capture support for Linux
 pcap-bt-linux.h	- Bluetooth capture support for Linux
 pcap-dag.c	- Endace DAG device capture support
 pcap-dag.h	- Endace DAG device capture support
+pcap-nfpshm.c	- NFP shared memory capture support
+pcap-nfpshm.h	- NFP shared memory capture support
 pcap-dlpi.c	- Data Link Provider Interface support
 pcap-dos.c	- MS-DOS capture support
 pcap-dos.h	- headers for MS-DOS capture support

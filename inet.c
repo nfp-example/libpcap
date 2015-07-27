@@ -896,6 +896,9 @@ pcap_lookupnet(device, netp, maskp, errbuf)
 #ifdef HAVE_DAG_API
 	    || strstr(device, "dag") != NULL
 #endif
+#ifdef HAVE_NFPSHM_API
+	    || strstr(device, "nfpshm") != NULL
+#endif
 #ifdef HAVE_SEPTEL_API
 	    || strstr(device, "septel") != NULL
 #endif

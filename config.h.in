@@ -6,6 +6,9 @@
 /* define if you have a cloning BPF device */
 #undef HAVE_CLONING_BPF
 
+/* define if you have the NFP SHM API */
+#undef HAVE_NFPSHM_API
+
 /* define if you have the DAG API */
 #undef HAVE_DAG_API
 
