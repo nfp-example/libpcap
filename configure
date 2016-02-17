@@ -6542,14 +6542,14 @@ $as_echo_n "checking whether we have NFP SHM API headers... " >&6; }
 	fi
 
 	if test -z "$nfpshm_include_dir"; then
-		nfpshm_include_dir="$nfpshm_root/include"
+		nfpshm_include_dir="$nfpshm_root/src"
 	fi
 
-	if test -z "$nfpshm_lib_dir"; then
-	    nfpshm_lib_dir="$nfpshm_root/host/lib"
-	fi
+	#if test -z "$nfpshm_lib_dir"; then
+	#    nfpshm_lib_dir="$nfpshm_root/host/lib"
+	#fi
 
-	if test -r $nfpshm_include_dir/nfpshm.h; then
+	if test -r $nfpshm_include_dir/nfp_ipc.h; then
 		ac_cv_lbl_nfpshm_api=yes
 	fi
 	{ $as_echo "$as_me:${as_lineno-$LINENO}: result: $ac_cv_lbl_nfpshm_api ($nfpshm_include_dir)" >&5
