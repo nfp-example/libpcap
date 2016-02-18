@@ -424,6 +424,7 @@ pcap_findalldevs(pcap_if_t **alldevsp, char *errbuf)
 pcap_t *
 pcap_create(const char *source, char *errbuf)
 {
+    fprintf(stderr,"Pcap create source '%s'\n",source);
 	size_t i;
 	int is_theirs;
 	pcap_t *p;

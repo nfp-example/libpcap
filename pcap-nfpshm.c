@@ -1,8 +1,15 @@
-/*
+/**
  * pcap-nfpshm.c: Packet capture interface for NFP SHM pcap firmware
  *
  */
 
+/** Make capturetest
+./configure  -with-nfpshm=/root/gavin/nfp-common/host
+make
+cc -fpic -I.  -I/root/gavin/nfp-common/host/src -I/usr/include/dbus-1.0 -I/usr/lib/x86_64-linux-gnu/dbus-1.0/include   -DHAVE_CONFIG_H  -D_U_="__attribute__((unused))" -g -O2    -I. -L. -o capturetest ./tests/capturetest.c libpcap.a -ldbus-1 ../nfp-common/host/build/nfp_ipc.o ../nfp-common/host/build/nfp_support.o -L/opt/netronome/lib -L/usr/lib/x86_64-linux-gnu/ -lnfp -lnfp_nffw -lhugetlbfs -ljansson
+*/
+/** Includes
+ */
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -27,26 +34,106 @@ struct rtentry;		/* declarations in <net/if.h> */
 #include <net/if.h>
 
 #include "nfp_ipc.h"
+#include "nfp_support.h"
+#include "pktgencap.h"
 
 #include "pcap-nfpshm.h"
 
-/*
- * Private data for capturing on DAG devices.
+/** struct pcap_pkt_buf_desc
+ *
+ * Packet buffer descriptor stored in the host and MU buffer.  The offset
+ * is the 64B block offset from mu_base_s8.  num_blocks is the number
+ * of 64B block spaces used in the MU buffer for the packet. The
+ * sequence number is a 16/32-bit sequence number of the packet, as
+ * supplied by the NBI Rx.
+ *
  */
-struct pcap_dag {
+#define PCAP_BUF_TOTAL_PKTS 1024
+#define PCAP_BUF_MAX_PKT (PCAP_BUF_TOTAL_PKTS-4)
+#ifdef __NFCC_VERSION
+struct pcap_pkt_buf_desc {
+    uint32_t offset:16;
+    uint32_t num_blocks:16;
+    uint32_t seq;
+};
+#else
+struct pcap_pkt_buf_desc {
+    uint32_t num_blocks:16;
+    uint32_t offset:16;
+    uint32_t seq;
+};
+#endif
+
+/** struct pcap_buf_hdr
+ *
+ *  Structure placed at start of an MU/host buffer
+ *
+ *  Not actually transferred to host, so really only in the MU side
+ */
+struct pcap_buf_hdr {
+    uint32_t buf_seq;         /* MU/host buffer sequence number */
+    uint32_t total_packets;   /* Valid when buffer is complete */
+    uint32_t pcie_base_low;   /* Filled at pre-allocation */
+    uint32_t pcie_base_high;  /* Filled at pre-allocation */
+};
+
+/** struct pcap_buffer
+ *
+ * MU/host buffer layout, up to the packet data, which is placed at
+ * PCAP_BUF_FIRST_PKT_OFFSET
+ *
+ * Note that this must be less than PCAP_BUF_FIRST_PKT_OFFSET in size
+ * Note also that the pkt_add_mu_buf_desc clears this structure in a
+ * 'knowledgeable manner', i.e. it knows the structure and offsets
+ * intimately. So changing this structure requires changing that
+ * function.
+ */
+struct pcap_buffer {
+    struct pcap_buf_hdr hdr;
+    int      dmas_completed;  /* For DMA Master/slaves */
+    uint32_t pad[11];         /* Pad to 64B alignment */
+    uint32_t pkt_bitmask[PCAP_BUF_TOTAL_PKTS/32]; /* n*64B to pad
+                                                 * properly */
+    struct pcap_pkt_buf_desc pkt_desc[PCAP_BUF_MAX_PKT];
+};
+
+/** struct pcap_nfmshm - private data for NFP SHM capture firmware
+ */
+struct pcap_nfpshm {
+    pcap_t *pcap;
+    struct pcap_nfpshm *next_nfpshm;
+
 	struct pcap_stat stat;
-	void	*dag_mem_base;	/* DAG card memory base address */
-	u_int	dag_mem_bottom;	/* DAG card current memory bottom offset */
-	u_int	dag_mem_top;	/* DAG card current memory top offset */
-	int	dag_fcs_bits;	/* Number of checksum bits from link layer */
-	int	dag_stream;	/* DAG stream number */
-	int	dag_timeout;	/* timeout specified to pcap_open_live.
-				 * Same as in linux above, introduce
-				 * generally? */
     int nonblock;
+
+    struct nfp *nfp;
+    struct {
+        char *base;
+        size_t size;
+    } shm;
     struct nfp_ipc *nfp_ipc;
     int nfp_ipc_client;
+    struct pktgen_ipc_msg *pktgen_msg;
+    struct nfp_ipc_msg *msg;
+                                               
+    int msg_sent;
+    int next_seq;
+    int current_buffer;
+    int next_pkt;
+    int next_buffer;
+    int buffers_to_recycle[2];
 };
+
+/** Static variables
+ */
+static struct pcap_nfpshm *nfpshms = NULL;
+static int atexit_handler_installed = 0;
+static const char *shm_filename="/tmp/nfp_shm.lock";
+static int shm_key = 'x';
+
+
+/** To be removed
+ */
 struct dag_record_t
 {
     int ts;
@@ -55,143 +142,99 @@ struct dag_record_t
     int lctr;
     int type;
 };
-
-typedef struct pcap_dag_node {
-	struct pcap_dag_node *next;
-	pcap_t *p;
-	pid_t pid;
-} pcap_dag_node_t;
-
-static pcap_dag_node_t *pcap_dags = NULL;
-static int atexit_handler_installed = 0;
 static const unsigned short endian_test_word = 0x0100;
-
 #define IS_BIGENDIAN() (*((unsigned char *)&endian_test_word))
-
 #define MAX_DAG_PACKET 65536
-
 static unsigned char TempPkt[MAX_DAG_PACKET];
 
-static int nfpshm_set_datalink(pcap_t *p, int dlt);
+/** Forward function declarations
+ */
+static void nfpshm_atexit_handler(void);
 
-static void
-delete_pcap_dag(pcap_t *p)
+/** nfpshm_alloc_shm - from pktgen_alloc_shm
+ */
+static int
+nfpshm_alloc_shm(struct pcap_nfpshm *pd)
 {
-	pcap_dag_node_t *curr = NULL, *prev = NULL;
+    pd->nfp = nfp_init(-1);
+    pd->shm.size = nfp_shm_alloc(pd->nfp,
+                                shm_filename, shm_key,
+                                pd->shm.size, 0);
+    if (pd->shm.size == 0) {
+        fprintf(stderr,"Failed to find NFP SHM\n");
+        return -1;
+    }
 
-	for (prev = NULL, curr = pcap_dags; curr != NULL && curr->p != p; prev = curr, curr = curr->next) {
-		/* empty */
-	}
-
-	if (curr != NULL && curr->p == p) {
-		if (prev != NULL) {
-			prev->next = curr->next;
-		} else {
-			pcap_dags = curr->next;
-		}
-	}
+    pd->shm.base = nfp_shm_data(pd->nfp);
+    pd->nfp_ipc = (struct nfp_ipc *)pd->shm.base;
+    fprintf(stderr,"%s %p %lld\n",__func__,pd->shm.base,pd->shm.size);
+    return 0;
 }
 
-/*
- * Performs a graceful shutdown of the DAG card, frees dynamic memory held
- * in the pcap_t structure, and closes the file descriptor for the DAG card.
+/** nfpshm_add - add an NFP SHM pcap (already created) to static list for deletion at exit
  */
-
 static void
-dag_platform_cleanup(pcap_t *p)
+nfpshm_add(struct pcap_nfpshm *pd)
 {
-	struct pcap_dag *pd;
+    fprintf(stderr,"%s\n",__func__);
+	if (!atexit_handler_installed) {
+		atexit(nfpshm_atexit_handler);
+		atexit_handler_installed = 1;
+	}
 
+    pd->next_nfpshm = nfpshms;
+    nfpshms = pd;
+    fprintf(stderr,"handler installed %d shms %p\n",atexit_handler_installed,nfpshms);
+}
+
+/** nfpshm_delete - Remove an NFP SHM pcap from list for deletion at exit
+ */
+static void
+nfpshm_delete(struct pcap_nfpshm *pd)
+{
+    fprintf(stderr,"%s\n",__func__);
+    struct pcap_nfpshm *ptr, **prev;
+    prev = &nfpshms;
+    for (ptr = nfpshms; ptr && (ptr!=pd); ptr=ptr->next_nfpshm) {
+        prev = &ptr->next_nfpshm;
+    }
+    if (ptr==pd) {
+        *prev = ptr->next_nfpshm;
+    }
+}
+
+/** nfpshm_cleanup - Stop an NFP SHM pcap instances cleanly and remove from exit cleanup list
+ */
+static void
+nfpshm_cleanup(pcap_t *p)
+{
+	struct pcap_nfpshm *pd;
+
+    fprintf(stderr,"%s\n",__func__);
 	if (p != NULL) {
 		pd = p->priv;
 
         nfp_ipc_stop_client(pd->nfp_ipc, pd->nfp_ipc_client);
 
+		nfpshm_delete(pd);
 
-		if(dag_stop(p->fd) < 0)
-			fprintf(stderr,"dag_stop: %s\n", strerror(errno));
-		if(p->fd != -1) {
-			if(dag_close(p->fd) < 0)
-				fprintf(stderr,"dag_close: %s\n", strerror(errno));
-			p->fd = -1;
-		}
-		delete_pcap_dag(p);
 		pcap_cleanup_live_common(p);
 	}
 	/* Note: don't need to call close(p->fd) here as dag_close(p->fd) does this. */
 }
 
+/** nfpshm_atexit_handler - clean up all NFP SHM pcap instances for exit
+ */
 static void
-atexit_handler(void)
+nfpshm_atexit_handler(void)
 {
-	while (pcap_dags != NULL) {
-		if (pcap_dags->pid == getpid()) {
-			dag_platform_cleanup(pcap_dags->p);
-		} else {
-			delete_pcap_dag(pcap_dags->p);
-		}
+    fprintf(stderr,"%s\n",__func__);
+	while (nfpshms) {
+        nfpshm_cleanup(nfpshms->pcap);
 	}
 }
 
-static int
-new_pcap_dag(pcap_t *p)
-{
-	pcap_dag_node_t *node = NULL;
-
-	if ((node = malloc(sizeof(pcap_dag_node_t))) == NULL) {
-		return -1;
-	}
-
-	if (!atexit_handler_installed) {
-		atexit(atexit_handler);
-		atexit_handler_installed = 1;
-	}
-
-	node->next = pcap_dags;
-	node->p = p;
-	node->pid = getpid();
-
-	pcap_dags = node;
-
-	return 0;
-}
-
-static unsigned int
-dag_erf_ext_header_count(uint8_t * erf, size_t len)
-{
-	uint32_t hdr_num = 0;
-	uint8_t  hdr_type;
-
-	/* basic sanity checks */
-	if ( erf == NULL )
-		return 0;
-	if ( len < 16 )
-		return 0;
-
-	/* check if we have any extension headers */
-	if ( (erf[8] & 0x80) == 0x00 )
-		return 0;
-
-	/* loop over the extension headers */
-	do {
-
-		/* sanity check we have enough bytes */
-		if ( len < (24 + (hdr_num * 8)) )
-			return hdr_num;
-
-		/* get the header type */
-		hdr_type = erf[(16 + (hdr_num * 8))];
-		hdr_num++;
-
-	} while ( hdr_type & 0x80 );
-
-	return hdr_num;
-}
-
-/*
- * Installs the given bpf filter program in the given pcap structure.  There is
- * no attempt to store the filter in kernel memory as that is not supported
- * with NFP SHM pcap firmware.
+/** nfpshm_setfilter - Set BPF filter in PCAP software - no BPF at present in pcap firmware
  */
 static int
 nfpshm_setfilter(pcap_t *p, struct bpf_program *fp)
@@ -212,21 +255,27 @@ nfpshm_setfilter(pcap_t *p, struct bpf_program *fp)
 	return (0);
 }
 
+/** nfpshm_setnonblock - Set PCAP to be nonblocking (on/off)
+ */
 static int
 nfpshm_setnonblock(pcap_t *p, int nonblock, char *errbuf)
 {
-	struct pcap_dag *pd = p->priv;
+	struct pcap_nfpshm *pd = p->priv;
     pd->nonblock = nonblock;
 	return (0);
 }
 
+/** nfpshm_getnonblock - Get state of PCAP nonblocking
+*/
 static int
 nfpshm_getnonblock(pcap_t *p, char *errbuf)
 {
-	struct pcap_dag *pd = p->priv;
+	struct pcap_nfpshm *pd = p->priv;
     return pd->nonblock;
 }
 
+/** nfpshm_set_datalink - Set data link of pcap to one of those supported
+*/
 static int
 nfpshm_set_datalink(pcap_t *p, int dlt)
 {
@@ -235,10 +284,12 @@ nfpshm_set_datalink(pcap_t *p, int dlt)
 	return (0);
 }
 
+/** nfpshm_get_datalink - Get data link types
+*/
 static int
 nfpshm_get_datalink(pcap_t *p)
 {
-	struct pcap_dag *pd = p->priv;
+	struct pcap_nfpshm *pd = p->priv;
 	int index=0, dlt_index=0;
 
 	if (p->dlt_list == NULL && (p->dlt_list = malloc(255*sizeof(*(p->dlt_list)))) == NULL) {
@@ -265,16 +316,48 @@ nfpshm_get_datalink(pcap_t *p)
 	return p->linktype;
 }
 
-/*
- *  Read at most max_packets from the capture stream and call the callback
- *  for each of them. Returns the number of packets handled, -1 if an
+/* nfpshm_read - Read packets and invoke callback handler
+ *  Returns the number of packets handled, -1 if an
  *  error occured, or -2 if we were told to break out of the loop.
  */
 static int
-dag_read(pcap_t *p, int cnt, pcap_handler callback, u_char *user)
+nfpshm_read(pcap_t *p, int cnt, pcap_handler callback, u_char *user)
 {
-	struct pcap_dag *pd = p->priv;
+	struct pcap_nfpshm *pd = p->priv;
 	unsigned int processed = 0;
+    uint64_t phys_offset;
+    struct pcap_buffer *pcap_buffer;
+    int j;
+		struct pcap_pkthdr	pcap_header;
+#define PCIE_HUGEPAGE_SIZE (1<<20)
+    phys_offset = PCIE_HUGEPAGE_SIZE + (pd->current_buffer<<18);
+    pcap_buffer = (struct pcap_buffer *)(pd->shm.base + phys_offset);
+    j = pd->next_pkt;
+    if (pcap_buffer->pkt_desc[j].offset==0)
+        return 0;
+    pd->next_pkt++;
+    fprintf(stderr, "%d: %04x %04x %08x\n",j,
+           pcap_buffer->pkt_desc[j].offset,
+           pcap_buffer->pkt_desc[j].num_blocks,
+           pcap_buffer->pkt_desc[j].seq
+        );
+    //mem_dump(((char *)pcap_buffer) + (pcap_buffer->pkt_desc[j].offset<<6), 64);
+    // skipping bpf
+    /* convert between timestamp formats */
+    pcap_header.ts.tv_sec = 0;
+    pcap_header.ts.tv_usec = pcap_buffer->pkt_desc[j].seq;
+    //register unsigned long long ts;
+    //ts = header->ts;
+    //if (IS_BIGENDIAN()) ts=SWAPLL(ts);
+
+    /* Fill in our own header data */
+    pcap_header.caplen = pcap_buffer->pkt_desc[j].num_blocks*64;
+    pcap_header.len = pcap_header.caplen;
+    pd->stat.ps_recv++;
+    callback(user, &pcap_header, ((char *)pcap_buffer) + (pcap_buffer->pkt_desc[j].offset<<6));
+    return 1;
+
+#if 0
 	unsigned int nonblocking = pd->nonblock;
 	unsigned int num_ext_hdr = 0;
 	unsigned int ticks_per_second;
@@ -486,10 +569,12 @@ dag_read(pcap_t *p, int cnt, pcap_handler callback, u_char *user)
 			}
 		}
 	}
-
+#endif
 	return processed;
 }
 
+/** nfpshm_inject - No support for packet transmission, so not supported
+*/
 static int
 nfpshm_inject(pcap_t *p, const void *buf _U_, size_t size _U_)
 {
@@ -498,111 +583,56 @@ nfpshm_inject(pcap_t *p, const void *buf _U_, size_t size _U_)
 	return (-1);
 }
 
+/** nfpshm_stats - Get statistics from private data
+*/
 static int
 nfpshm_stats(pcap_t *p, struct pcap_stat *ps) {
-	struct pcap_dag *pd = p->priv;
+	struct pcap_nfpshm *pd = p->priv;
 	*ps = pd->stat;
 
 	return 0;
 }
 
-/*
- *  Get a handle for a live capture from the given DAG device.  Passing a NULL
- *  device will result in a failure.  The promisc flag is ignored because DAG
- *  cards are always promiscuous.  The to_ms parameter is used in setting the
- *  API polling parameters.
- *
- *  snaplen is now also ignored, until we get per-stream slen support. Set
- *  slen with approprite DAG tool BEFORE pcap_activate().
- *
- *  See also pcap(3).
+/** nfpshm_activate - Open an NFP SHM capture device
  */
-static int nfpshm_activate(pcap_t *p)
+static int
+nfpshm_activate(pcap_t *p)
 {
-	struct pcap_dag *pd = p->priv;
+	struct pcap_nfpshm *pd = p->priv;
 	char *s;
 	int n;
-	daginf_t* daginf;
-	char * newDev = NULL;
-	char * device = p->opt.source;
     struct nfp_ipc_client_desc nfp_ipc_client_desc;
+
+    fprintf(stderr,"%s\n",__func__);
+    if (nfpshm_alloc_shm(pd)<0) {
+        fprintf(stderr, "Failed to allocate NFP SHM - is server running?\n");
+        goto fail;
+    }
 
     nfp_ipc_client_desc.name = "libpcap";
     pd->nfp_ipc_client = nfp_ipc_start_client(pd->nfp_ipc, &nfp_ipc_client_desc);
     if (pd->nfp_ipc_client < 0) {
-        fprintf(stderr, "Failed to connect to pktgen SHM\n");
+        fprintf(stderr, "Failed to connect to pktgen SHM - is correct server running?\n");
         goto fail;
     }
 
-        struct pktgen_ipc_msg *pktgen_msg;
-        struct nfp_ipc_msg *msg;
-        msg = nfp_ipc_alloc_msg(pd->nfp_ipc, sizeof(struct pktgen_ipc_msg));
-        pktgen_msg = (struct pktgen_ipc_msg *)(&msg->data[0]);
+    nfpshm_add(pd);
 
-	/*
-	 * Find out how many FCS bits we should strip.
-	 * First, query the card to see if it strips the FCS.
-	 */
-	daginf = dag_info(p->fd);
-	if ((0x4200 == daginf->device_code) || (0x4230 == daginf->device_code))	{
-		/* DAG 4.2S and 4.23S already strip the FCS.  Stripping the final word again truncates the packet. */
-		pd->dag_fcs_bits = 0;
+    pd->msg_sent = 0;
+    pd->current_buffer = 0;
+    pd->next_buffer = -1;
+    pd->next_pkt = 0;
+    pd->msg = nfp_ipc_alloc_msg(pd->nfp_ipc, sizeof(struct pktgen_ipc_msg));
+    pd->pktgen_msg = (struct pktgen_ipc_msg *)(&pd->msg->data[0]);
 
-		/* Note that no FCS will be supplied. */
-		p->linktype_ext = LT_FCS_DATALINK_EXT(0);
-	} else {
-		/*
-		 * Start out assuming it's 32 bits.
-		 */
-		pd->dag_fcs_bits = 32;
+    /* Note that no FCS will be supplied. */
+    p->linktype_ext = LT_FCS_DATALINK_EXT(0);
 
-		/* Allow an environment variable to override. */
-		if ((s = getenv("ERF_FCS_BITS")) != NULL) {
-			if ((n = atoi(s)) == 0 || n == 16 || n == 32) {
-				pd->dag_fcs_bits = n;
-			} else {
-				snprintf(p->errbuf, PCAP_ERRBUF_SIZE,
-					"pcap_activate %s: bad ERF_FCS_BITS value (%d) in environment\n", device, n);
-				goto failstop;
-			}
-		}
-
-		/*
-		 * Did the user request that they not be stripped?
-		 */
-		if ((s = getenv("ERF_DONT_STRIP_FCS")) != NULL) {
-			/* Yes.  Note the number of bytes that will be
-			   supplied. */
-			p->linktype_ext = LT_FCS_DATALINK_EXT(pd->dag_fcs_bits/16);
-
-			/* And don't strip them. */
-			pd->dag_fcs_bits = 0;
-		}
-	}
-
-	pd->dag_timeout	= p->opt.timeout;
-
-	p->linktype = -1;
-	if (dag_get_datalink(handle) < 0)
-		goto failstop;
-
+    p->linktype = DLT_EN10MB;
 	p->bufsize = 0;
-
-	if (new_pcap_dag(handle) < 0) {
-		snprintf(p->errbuf, PCAP_ERRBUF_SIZE, "new_pcap_dag %s: %s\n", device, pcap_strerror(errno));
-		goto failstop;
-	}
-
-	/*
-	 * "select()" and "poll()" don't work on DAG device descriptors.
-	 */
 	p->selectable_fd = -1;
 
-	if (newDev != NULL) {
-		free((char *)newDev);
-	}
-
-	p->read_op = dag_read;
+	p->read_op = nfpshm_read;
 	p->inject_op = nfpshm_inject;
 	p->setfilter_op = nfpshm_setfilter;
 	p->setdirection_op = NULL; /* Not implemented.*/
@@ -610,30 +640,20 @@ static int nfpshm_activate(pcap_t *p)
 	p->getnonblock_op  = nfpshm_getnonblock;
 	p->setnonblock_op  = nfpshm_setnonblock;
 	p->stats_op        = nfpshm_stats;
-	p->cleanup_op = dag_platform_cleanup;
+	p->cleanup_op = nfpshm_cleanup;
 	pd->stat.ps_drop = 0;
 	pd->stat.ps_recv = 0;
 	pd->stat.ps_ifdrop = 0;
 	return 0;
 
-failstop:
-	if (dag_stop(p->fd) < 0)
-		fprintf(stderr,"dag_stop: %s\n", strerror(errno));
-
-failclose:
-	if (dag_close(p->fd) < 0)
-		fprintf(stderr,"dag_close: %s\n", strerror(errno));
-	delete_pcap_dag(handle);
-
 fail:
-	pcap_cleanup_live_common(handle);
-	if (newDev != NULL) {
-		free((char *)newDev);
-	}
+	pcap_cleanup_live_common(p);
 
 	return PCAP_ERROR;
 }
 
+/** nfpshm_create - Create a PCAP instance for an NFP SHM if device name matches
+*/
 pcap_t *nfpshm_create(const char *device, char *ebuf, int *is_ours)
 {
 	const char *cp;
@@ -661,7 +681,7 @@ pcap_t *nfpshm_create(const char *device, char *ebuf, int *is_ours)
 	/* OK, it's probably ours. */
 	*is_ours = 1;
 
-	p = pcap_create_common(device, ebuf, sizeof (struct pcap_dag));
+	p = pcap_create_common(device, ebuf, sizeof (struct pcap_nfpshm));
 	if (p == NULL)
 		return NULL;
 
@@ -682,6 +702,8 @@ pcap_t *nfpshm_create(const char *device, char *ebuf, int *is_ours)
 	return p;
 }
 
+/** nfpshm_findalldevs - Add list of NFP SHM interfaces that can be created
+*/
 int
 nfpshm_findalldevs(pcap_if_t **devlistp, char *errbuf)
 {
