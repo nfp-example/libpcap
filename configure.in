@@ -933,22 +933,18 @@ if test "$want_nfpshm" != no; then
 	    nfpshm_root=/usr/local
 	fi
 
-	if test -z "$nfpshm_include_dir"; then
-		nfpshm_include_dir="$nfpshm_root/src"
-	fi
-
 	#if test -z "$nfpshm_lib_dir"; then
 	#    nfpshm_lib_dir="$nfpshm_root/host/lib"
 	#fi
 
-	if test -r $nfpshm_include_dir/nfp_ipc.h; then
+	if test -r $nfpshm_root/host/src/nfp_ipc.h; then
 		ac_cv_lbl_nfpshm_api=yes
 	fi
-	AC_MSG_RESULT([$ac_cv_lbl_nfpshm_api ($nfpshm_include_dir)])
+	AC_MSG_RESULT([$ac_cv_lbl_nfpshm_api ($nfpshm_root)])
 fi
 
 if test $ac_cv_lbl_nfpshm_api = yes; then
-	V_INCLS="$V_INCLS -I$nfpshm_include_dir"
+	V_INCLS="$V_INCLS -I$nfpshm_root/host/src -I$nfpshm_root/include "
 
 	if test $V_PCAP != nfpshm ; then
 		 SSRC="pcap-nfpshm.c"
@@ -959,7 +955,7 @@ if test $ac_cv_lbl_nfpshm_api = yes; then
 	# included if there's a found-action (arg 3).
 	LDFLAGS="$LDFLAGS -L/opt/netronome/lib -L/usr/lib/x86_64-linux-gnu/ "
 	CFLAGS="$CFLAGS -L/opt/netronome/lib -L/usr/lib/x86_64-linux-gnu/ "
-    LIBS="$LIBS $nfpshm_root/build/nfp_ipc.o $nfpshm_root/build/nfp_support.o  -lnfp -lnfp_nffw -lhugetlbfs -ljansson"
+    LIBS="$LIBS $nfpshm_root/host/build/nfp_ipc.o $nfpshm_root/host/build/nfp_support.o  -lnfp -lhugetlbfs -ljansson"
 	#saved_ldflags=$LDFLAGS
 	#AC_CHECK_LIB([dag], [dag_attach_stream], [dag_streams="1"], [dag_streams="0"])
 	#AC_CHECK_LIB([dag],[dag_get_erf_types], [
