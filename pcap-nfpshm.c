@@ -301,6 +301,7 @@ nfpshm_read(pcap_t *p, int cnt, pcap_handler callback, u_char *user)
         int timeout;
         int poll;
         struct nfp_ipc_event event;
+        static int claims=0;
        
         timeout = 1000*1000; // in usecs
         fprintf(stderr, "polling message\n");
@@ -317,7 +318,8 @@ nfpshm_read(pcap_t *p, int cnt, pcap_handler callback, u_char *user)
             if (msg->reason == PKTGEN_IPC_RETURN_BUFFERS) {
                 int claimed_buffer;
                 claimed_buffer = msg->return_buffers.buffers[0];
-                fprintf(stderr, "got claimed_buffer %d\n", claimed_buffer);
+                claims++;
+                fprintf(stderr, "%d: got claimed_buffer %d\n", claims, claimed_buffer);
                 if (claimed_buffer>=0)
                     pd->current_buffer = claimed_buffer;
             }
@@ -344,14 +346,16 @@ nfpshm_read(pcap_t *p, int cnt, pcap_handler callback, u_char *user)
             break;
         }
         pd->next_pkt++;
-        fprintf(stderr, "%d: %d.%d: %04x %04x %08x\n",
-                j,
-                pcap_buffer->hdr.total_packets,
-                pcap_buffer->dmas_completed,
-                pcap_buffer->pkt_desc[j].offset,
-                pcap_buffer->pkt_desc[j].num_blocks,
-                pcap_buffer->pkt_desc[j].seq
-            );
+        if (0) {
+            fprintf(stderr, "%d: %d.%d: %04x %04x %08x\n",
+                    j,
+                    pcap_buffer->hdr.total_packets,
+                    pcap_buffer->dmas_completed,
+                    pcap_buffer->pkt_desc[j].offset,
+                    pcap_buffer->pkt_desc[j].num_blocks,
+                    pcap_buffer->pkt_desc[j].seq
+                );
+        }
         //mem_dump(((char *)pcap_buffer) + (pcap_buffer->pkt_desc[j].offset<<6), 64);
         // skipping bpf
         /* convert between timestamp formats */
