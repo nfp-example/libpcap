@@ -319,7 +319,7 @@ nfpshm_read_poll_msg(struct pcap_nfpshm *pd)
             int claimed_buffer;
             claimed_buffer = msg->return_buffers.buffers[0];
             claims++;
-            //fprintf(stderr, "%d: got claimed_buffer %d\n", claims, claimed_buffer);
+            fprintf(stderr, "%d: got claimed_buffer %d\n", claims, claimed_buffer);
             if (claimed_buffer>=0) {
                 if (pd->current_buffer<0) {
                     pd->current_buffer = claimed_buffer;
@@ -366,11 +366,12 @@ nfpshm_read(pcap_t *p, int cnt, pcap_handler callback, u_char *user)
     if (pd->current_buffer<0)
         return 0;
 
+    if (cnt<0) cnt=4000;
 #define PCIE_HUGEPAGE_SIZE (1<<20)
     phys_offset = PCIE_HUGEPAGE_SIZE + (pd->current_buffer<<18);
     pcap_buffer = (struct pcap_buffer *)(pd->shm.base + phys_offset);
 
-    while ((processed<cnt) && (!p->break_loop)) {
+    while (!p->break_loop) {
         j = pd->next_pkt;
 
         if ((pcap_buffer->hdr.total_packets!=0) && (j == pcap_buffer->hdr.total_packets)) {
@@ -427,6 +428,8 @@ nfpshm_read(pcap_t *p, int cnt, pcap_handler callback, u_char *user)
         pd->stat.ps_recv++;
         callback(user, &pcap_header, ((char *)pcap_buffer) + (pcap_buffer->pkt_desc[j].offset<<6));
         processed++;
+        if (processed==cnt)
+            break;
     }
     if (p->break_loop) {
         p->break_loop = 0;
