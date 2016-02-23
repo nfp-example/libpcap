@@ -262,6 +262,78 @@ nfpshm_get_datalink(pcap_t *p)
 	return p->linktype;
 }
 
+/* nfpshm_read_send_msg - Send an NFP IPC message if required
+ */
+static void
+nfpshm_read_send_msg(struct pcap_nfpshm *pd)
+{
+    if (pd->msg_sent)
+        return;
+    if (pd->current_buffer<0) {
+        //fprintf(stderr, "sending message\n");
+        pd->pktgen_msg->reason = PKTGEN_IPC_RETURN_BUFFERS;
+        pd->pktgen_msg->ack = 0;
+        pd->pktgen_msg->return_buffers.buffers[0] = pd->buffers_to_recycle[0];
+        pd->pktgen_msg->return_buffers.buffers[1] = pd->buffers_to_recycle[1];
+        pd->buffers_to_recycle[0] = -1;
+        pd->buffers_to_recycle[1] = -1;
+        pd->pktgen_msg->return_buffers.buffers_to_claim = 2;
+        nfp_ipc_client_send_msg(pd->nfp_ipc, pd->nfp_ipc_client, pd->msg);
+        pd->msg_sent = 1;
+    } else if (pd->next_buffer<0) {
+        pd->pktgen_msg->reason = PKTGEN_IPC_RETURN_BUFFERS;
+        pd->pktgen_msg->ack = 0;
+        pd->pktgen_msg->return_buffers.buffers[0] = pd->buffers_to_recycle[0];
+        pd->pktgen_msg->return_buffers.buffers[1] = pd->buffers_to_recycle[1];
+        pd->buffers_to_recycle[0] = -1;
+        pd->buffers_to_recycle[1] = -1;
+        pd->pktgen_msg->return_buffers.buffers_to_claim = 1;
+        nfp_ipc_client_send_msg(pd->nfp_ipc, pd->nfp_ipc_client, pd->msg);
+        pd->msg_sent = 1;
+    }
+}
+
+/* nfpshm_read_poll_msg - Poll for message reply from nfp ipc
+ */
+static void
+nfpshm_read_poll_msg(struct pcap_nfpshm *pd)
+{
+    int poll;
+    struct nfp_ipc_event event;
+    static int claims=0;
+    struct pktgen_ipc_msg *msg;
+    
+    if (!pd->msg_sent)
+        return;
+       
+    poll = nfp_ipc_client_poll(pd->nfp_ipc, pd->nfp_ipc_client, 0 /*timeout*/, &event);
+    if (poll==NFP_IPC_EVENT_SHUTDOWN) {
+        pd->ifup = 0;
+        return;
+    }
+    if (poll==NFP_IPC_EVENT_MESSAGE) {
+        pd->msg_sent = 0;
+
+        msg = (struct pktgen_ipc_msg *)&event.msg->data[0];
+        if (msg->reason == PKTGEN_IPC_RETURN_BUFFERS) {
+            int claimed_buffer;
+            claimed_buffer = msg->return_buffers.buffers[0];
+            claims++;
+            //fprintf(stderr, "%d: got claimed_buffer %d\n", claims, claimed_buffer);
+            if (claimed_buffer>=0) {
+                if (pd->current_buffer<0) {
+                    pd->current_buffer = claimed_buffer;
+                } else {
+                    pd->next_buffer = claimed_buffer;
+                }
+            }
+            if (msg->return_buffers.buffers[1]>=0) {
+                pd->next_buffer = msg->return_buffers.buffers[1];
+            }
+        }
+    }
+}
+
 /* nfpshm_read - Read packets and invoke callback handler
  *  Returns the number of packets handled, -1 if an
  *  error occured, or -2 if we were told to break out of the loop.
@@ -279,68 +351,52 @@ nfpshm_read(pcap_t *p, int cnt, pcap_handler callback, u_char *user)
 
     if (!pd->ifup)
         return -1;
+
     if (p->break_loop) {
         p->break_loop = 0;
         return -2;
     }
-    if (pd->current_buffer<0) {
-        if (!pd->msg_sent) {
-            fprintf(stderr, "sending message\n");
-            pd->pktgen_msg->reason = PKTGEN_IPC_RETURN_BUFFERS;
-            pd->pktgen_msg->ack = 0;
-            pd->pktgen_msg->return_buffers.buffers[0] = pd->buffers_to_recycle[0];
-            pd->pktgen_msg->return_buffers.buffers[1] = pd->buffers_to_recycle[1];
-            pd->buffers_to_recycle[0] = -1;
-            pd->buffers_to_recycle[1] = -1;
-            pd->pktgen_msg->return_buffers.buffers_to_claim = 1;
-            nfp_ipc_client_send_msg(pd->nfp_ipc, pd->nfp_ipc_client, pd->msg);
-            pd->msg_sent = 1;
-        }
-    }
-    if (pd->msg_sent) {
-        int timeout;
-        int poll;
-        struct nfp_ipc_event event;
-        static int claims=0;
-       
-        timeout = 1000*1000; // in usecs
-        fprintf(stderr, "polling message\n");
-        poll = nfp_ipc_client_poll(pd->nfp_ipc, pd->nfp_ipc_client, timeout, &event);
-        fprintf(stderr, "received %d\n", poll);
-        if (poll==NFP_IPC_EVENT_SHUTDOWN) {
-            pd->ifup = 0;
-            return -1;
-        }
-        if (poll==NFP_IPC_EVENT_MESSAGE) {
-            pd->msg_sent = 0;
-            struct pktgen_ipc_msg *msg;
-            msg = (struct pktgen_ipc_msg *)&event.msg->data[0];
-            if (msg->reason == PKTGEN_IPC_RETURN_BUFFERS) {
-                int claimed_buffer;
-                claimed_buffer = msg->return_buffers.buffers[0];
-                claims++;
-                fprintf(stderr, "%d: got claimed_buffer %d\n", claims, claimed_buffer);
-                if (claimed_buffer>=0)
-                    pd->current_buffer = claimed_buffer;
-            }
-        }
-    }
-    if (pd->current_buffer<0) {
+
+    nfpshm_read_send_msg(pd);
+    nfpshm_read_poll_msg(pd);
+
+    if (!pd->ifup)
+        return -1;
+
+    if (pd->current_buffer<0)
         return 0;
-    }
+
 #define PCIE_HUGEPAGE_SIZE (1<<20)
     phys_offset = PCIE_HUGEPAGE_SIZE + (pd->current_buffer<<18);
     pcap_buffer = (struct pcap_buffer *)(pd->shm.base + phys_offset);
+
     while ((processed<cnt) && (!p->break_loop)) {
         j = pd->next_pkt;
+
         if ((pcap_buffer->hdr.total_packets!=0) && (j == pcap_buffer->hdr.total_packets)) {
-            pd->buffers_to_recycle[0] = pd->current_buffer;
-            pd->current_buffer = -1;
+            if (pd->buffers_to_recycle[0]<0) {
+                pd->buffers_to_recycle[0] = pd->current_buffer;
+            } else {
+                pd->buffers_to_recycle[1] = pd->current_buffer;
+            }
             pd->next_pkt = 0;
-            return processed;
+            pd->current_buffer = pd->next_buffer;
+            pd->next_buffer = -1;
+            if (pd->current_buffer<0) {
+                return processed;
+            }
+            j = pd->next_pkt;
+            phys_offset = PCIE_HUGEPAGE_SIZE + (pd->current_buffer<<18);
+            pcap_buffer = (struct pcap_buffer *)(pd->shm.base + phys_offset);
         }
+
         if (pcap_buffer->pkt_desc[j].offset==0) {
-            usleep(10000);
+            //usleep(1000);
+            //fprintf(stderr, "Poll %d.%d\n", pd->current_buffer, j);
+            nfpshm_read_send_msg(pd);
+            nfpshm_read_poll_msg(pd);
+            if (!pd->ifup)
+                return -1;
         }
         if (pcap_buffer->pkt_desc[j].offset==0) {
             break;
