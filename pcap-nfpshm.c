@@ -319,7 +319,7 @@ nfpshm_read_poll_msg(struct pcap_nfpshm *pd)
             int claimed_buffer;
             claimed_buffer = msg->return_buffers.buffers[0];
             claims++;
-            fprintf(stderr, "%d: got claimed_buffer %d\n", claims, claimed_buffer);
+            //fprintf(stderr, "%d: got claimed_buffer %d (currently at %d.%d)\n", claims, claimed_buffer, pd->current_buffer, pd->next_pkt);
             if (claimed_buffer>=0) {
                 if (pd->current_buffer<0) {
                     pd->current_buffer = claimed_buffer;
@@ -338,6 +338,7 @@ nfpshm_read_poll_msg(struct pcap_nfpshm *pd)
  *  Returns the number of packets handled, -1 if an
  *  error occured, or -2 if we were told to break out of the loop.
  */
+static int total_packets=0;
 static int
 nfpshm_read(pcap_t *p, int cnt, pcap_handler callback, u_char *user)
 {
@@ -428,6 +429,10 @@ nfpshm_read(pcap_t *p, int cnt, pcap_handler callback, u_char *user)
         pd->stat.ps_recv++;
         callback(user, &pcap_header, ((char *)pcap_buffer) + (pcap_buffer->pkt_desc[j].offset<<6));
         processed++;
+        total_packets++;
+        if ((total_packets%(1000*1000))==0) {
+            fprintf(stderr,"Total packets handled %d0Mpps\n",total_packets/(1000*1000));
+        }
         if (processed==cnt)
             break;
     }
@@ -435,6 +440,7 @@ nfpshm_read(pcap_t *p, int cnt, pcap_handler callback, u_char *user)
         p->break_loop = 0;
         return -2;
     }
+    //if (processed>0) fprintf(stderr, "Returning from read at %d.%d\n", pd->current_buffer, pd->next_pkt);
     return processed;
 
 #if 0
