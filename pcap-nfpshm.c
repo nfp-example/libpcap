@@ -41,6 +41,7 @@ struct rtentry;		/* declarations in <net/if.h> */
 #include "pktgencap.h"
 #include "firmware/pcap.h"
 #include "pcap-nfpshm.h"
+#include "timer.h"
 
 /** struct pcap_nfmshm - private data for NFP SHM capture firmware
  */
@@ -68,6 +69,12 @@ struct pcap_nfpshm {
     int next_pkt;
     int next_buffer;
     int buffers_to_recycle[2];
+    struct {
+        t_sl_timer nfp_ipc_client_poll;
+        t_sl_timer nfpshm_read;
+        t_sl_timer nfpshm_idle;
+        t_sl_timer nfpshm_read_free_running;
+    } timers;
 };
 
 /** Static variables
@@ -262,7 +269,7 @@ nfpshm_get_datalink(pcap_t *p)
 	return p->linktype;
 }
 
-/* nfpshm_read_send_msg - Send an NFP IPC message if required
+/** nfpshm_read_send_msg - Send an NFP IPC message if required
  */
 static void
 nfpshm_read_send_msg(struct pcap_nfpshm *pd)
@@ -293,7 +300,7 @@ nfpshm_read_send_msg(struct pcap_nfpshm *pd)
     }
 }
 
-/* nfpshm_read_poll_msg - Poll for message reply from nfp ipc
+/** nfpshm_read_poll_msg - Poll for message reply from nfp ipc
  */
 static void
 nfpshm_read_poll_msg(struct pcap_nfpshm *pd)
@@ -334,7 +341,7 @@ nfpshm_read_poll_msg(struct pcap_nfpshm *pd)
     }
 }
 
-/* nfpshm_read - Read packets and invoke callback handler
+/** nfpshm_read - Read packets and invoke callback handler
  *  Returns the number of packets handled, -1 if an
  *  error occured, or -2 if we were told to break out of the loop.
  */
@@ -358,16 +365,21 @@ nfpshm_read(pcap_t *p, int cnt, pcap_handler callback, u_char *user)
         return -2;
     }
 
+    SL_TIMER_ENTRY(pd->timers.nfpshm_read);
+    SL_TIMER_ENTRY(pd->timers.nfp_ipc_client_poll);
     nfpshm_read_send_msg(pd);
     nfpshm_read_poll_msg(pd);
+    SL_TIMER_EXIT(pd->timers.nfp_ipc_client_poll);
 
     if (!pd->ifup)
         return -1;
 
-    if (pd->current_buffer<0)
+    if (pd->current_buffer<0) {
+        SL_TIMER_EXIT(pd->timers.nfpshm_read);
         return 0;
+    }
 
-    if (cnt<0) cnt=4000;
+    if (cnt<0) cnt=4000*1000;
 #define PCIE_HUGEPAGE_SIZE (1<<20)
     phys_offset = PCIE_HUGEPAGE_SIZE + (pd->current_buffer<<18);
     pcap_buffer = (struct pcap_buffer *)(pd->shm.base + phys_offset);
@@ -375,46 +387,38 @@ nfpshm_read(pcap_t *p, int cnt, pcap_handler callback, u_char *user)
     while (!p->break_loop) {
         j = pd->next_pkt;
 
-        if ((pcap_buffer->hdr.total_packets!=0) && (j == pcap_buffer->hdr.total_packets)) {
-            if (pd->buffers_to_recycle[0]<0) {
-                pd->buffers_to_recycle[0] = pd->current_buffer;
-            } else {
-                pd->buffers_to_recycle[1] = pd->current_buffer;
+        while (pcap_buffer->pkt_desc[j].offset==0) {
+            SL_TIMER_ENTRY(pd->timers.nfpshm_idle);
+            if ((pcap_buffer->hdr.total_packets!=0) && (j == pcap_buffer->hdr.total_packets)) {
+                if (pd->buffers_to_recycle[0]<0) {
+                    pd->buffers_to_recycle[0] = pd->current_buffer;
+                } else {
+                    pd->buffers_to_recycle[1] = pd->current_buffer;
+                }
+                pd->next_pkt = 0;
+                pd->current_buffer = pd->next_buffer;
+                pd->next_buffer = -1;
+                if (pd->current_buffer<0) {
+                    SL_TIMER_EXIT(pd->timers.nfpshm_idle);
+                    SL_TIMER_EXIT(pd->timers.nfpshm_read);
+                    return processed;
+                }
+                j = pd->next_pkt;
+                phys_offset = PCIE_HUGEPAGE_SIZE + (pd->current_buffer<<18);
+                pcap_buffer = (struct pcap_buffer *)(pd->shm.base + phys_offset);
             }
-            pd->next_pkt = 0;
-            pd->current_buffer = pd->next_buffer;
-            pd->next_buffer = -1;
-            if (pd->current_buffer<0) {
-                return processed;
-            }
-            j = pd->next_pkt;
-            phys_offset = PCIE_HUGEPAGE_SIZE + (pd->current_buffer<<18);
-            pcap_buffer = (struct pcap_buffer *)(pd->shm.base + phys_offset);
-        }
 
-        if (pcap_buffer->pkt_desc[j].offset==0) {
             //usleep(1000);
             //fprintf(stderr, "Poll %d.%d\n", pd->current_buffer, j);
+            SL_TIMER_ENTRY(pd->timers.nfp_ipc_client_poll);
             nfpshm_read_send_msg(pd);
             nfpshm_read_poll_msg(pd);
+            SL_TIMER_EXIT(pd->timers.nfp_ipc_client_poll);
+            SL_TIMER_EXIT(pd->timers.nfpshm_idle);
             if (!pd->ifup)
                 return -1;
         }
-        if (pcap_buffer->pkt_desc[j].offset==0) {
-            break;
-        }
         pd->next_pkt++;
-        if (0) {
-            fprintf(stderr, "%d: %d.%d: %04x %04x %08x\n",
-                    j,
-                    pcap_buffer->hdr.total_packets,
-                    pcap_buffer->dmas_completed,
-                    pcap_buffer->pkt_desc[j].offset,
-                    pcap_buffer->pkt_desc[j].num_blocks,
-                    pcap_buffer->pkt_desc[j].seq
-                );
-        }
-        //mem_dump(((char *)pcap_buffer) + (pcap_buffer->pkt_desc[j].offset<<6), 64);
         // skipping bpf
         /* convert between timestamp formats */
         pcap_header.ts.tv_sec = 0;
@@ -431,7 +435,26 @@ nfpshm_read(pcap_t *p, int cnt, pcap_handler callback, u_char *user)
         processed++;
         total_packets++;
         if ((total_packets%(1000*1000))==0) {
-            fprintf(stderr,"Total packets handled %d0Mpps\n",total_packets/(1000*1000));
+            double elapsed_time, poll_time, idle_time, read_time;
+            SL_TIMER_EXIT(pd->timers.nfpshm_read_free_running);
+            SL_TIMER_EXIT(pd->timers.nfpshm_read);
+            elapsed_time = SL_TIMER_VALUE_US(pd->timers.nfpshm_read_free_running);
+            poll_time = SL_TIMER_VALUE_US(pd->timers.nfp_ipc_client_poll);
+            idle_time = SL_TIMER_VALUE_US(pd->timers.nfpshm_idle);
+            read_time = SL_TIMER_VALUE_US(pd->timers.nfpshm_read);
+            fprintf(stderr,"Total packets handled %dMpps in %lf poll time %lf idle %lf read %lf\n",
+                    total_packets/(1000*1000),
+                    elapsed_time/1.0E6,
+                    poll_time/1.0E6,
+                    idle_time/1.0E6,
+                    read_time/1.0E6
+                );
+            SL_TIMER_INIT(pd->timers.nfp_ipc_client_poll);
+            SL_TIMER_INIT(pd->timers.nfpshm_read);
+            SL_TIMER_INIT(pd->timers.nfpshm_idle);
+            SL_TIMER_INIT(pd->timers.nfpshm_read_free_running);
+            SL_TIMER_ENTRY(pd->timers.nfpshm_read_free_running);
+            SL_TIMER_ENTRY(pd->timers.nfpshm_read);
         }
         if (processed==cnt)
             break;
@@ -441,6 +464,7 @@ nfpshm_read(pcap_t *p, int cnt, pcap_handler callback, u_char *user)
         return -2;
     }
     //if (processed>0) fprintf(stderr, "Returning from read at %d.%d\n", pd->current_buffer, pd->next_pkt);
+    SL_TIMER_EXIT(pd->timers.nfpshm_read);
     return processed;
 
 #if 0
@@ -734,6 +758,10 @@ nfpshm_activate(pcap_t *p)
 	pd->stat.ps_drop = 0;
 	pd->stat.ps_recv = 0;
 	pd->stat.ps_ifdrop = 0;
+    SL_TIMER_INIT(pd->timers.nfp_ipc_client_poll);
+    SL_TIMER_INIT(pd->timers.nfpshm_read);
+    SL_TIMER_INIT(pd->timers.nfpshm_idle);
+    SL_TIMER_INIT(pd->timers.nfpshm_read_free_running);
 	return 0;
 
 fail:
